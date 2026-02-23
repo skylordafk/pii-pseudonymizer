@@ -4,39 +4,15 @@ A Python CLI tool that detects and reversibly pseudonymizes personally identifia
 
 ## Installation
 
-### Prerequisites
-
-- Python 3.12+
-- **For the decryption GUI only:** tkinter (system package, not pip-installable)
-
-Install tkinter if you want the GUI:
-
-```bash
-# Ubuntu / Debian
-sudo apt install python3-tk
-
-# Fedora / RHEL
-sudo dnf install python3-tkinter
-
-# Arch
-sudo pacman -S tk
-
-# macOS (Homebrew) — match your Python version:
-brew install python-tk@3.13
-```
-
-### Setup
+Requires Python 3.12+ and git. New to the command line? See the [Beginner's Guide](BEGINNERS_GUIDE.md) for step-by-step setup on a fresh machine.
 
 ```bash
 git clone https://github.com/skylordafk/pii-pseudonymizer.git
 cd pii-pseudonymizer
 python3 -m venv .venv
 source .venv/bin/activate
-pip install --upgrade pip
 pip install -e .
 ```
-
-> **Note:** If you're on an older pip (< 21.3), the `pip install --upgrade pip` step is important — older versions can't do editable installs from `pyproject.toml` alone.
 
 ## Quick Start
 
@@ -86,7 +62,7 @@ pii-decrypt-gui
 
 Browse to your key file, enter your passphrase, and decrypt single values or entire files. The GUI auto-loads the key when you click Decrypt, auto-selects the correct PII type for each column, and accepts encrypted values with or without brackets.
 
-> Requires tkinter — see [Prerequisites](#prerequisites) above if you get a "no module named tkinter" error.
+> Requires tkinter (system package). See the [Beginner's Guide](BEGINNERS_GUIDE.md#1-install-prerequisites) if you get a "no module named tkinter" error.
 
 ## Other Commands
 
