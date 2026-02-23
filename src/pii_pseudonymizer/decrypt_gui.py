@@ -405,9 +405,19 @@ class DecryptGUI:
 
     # ── Decrypt operations ────────────────────────────────────────
 
-    def _decrypt_value(self):
+    def _ensure_key_loaded(self):
+        """Auto-load the key if path and passphrase are filled but key isn't loaded yet."""
+        if self.obfuscator:
+            return True
+        if self.key_path_var.get().strip() and self.passphrase_var.get():
+            self._load_key()
         if not self.obfuscator:
             messagebox.showerror("Error", "Load a key file first.")
+            return False
+        return True
+
+    def _decrypt_value(self):
+        if not self._ensure_key_loaded():
             return
 
         value = self.input_text.get("1.0", tk.END).strip()
@@ -443,8 +453,7 @@ class DecryptGUI:
             messagebox.showerror("Decryption Error", str(e))
 
     def _run_decode(self, verify_only=False):
-        if not self.obfuscator:
-            messagebox.showerror("Error", "Load a key file first.")
+        if not self._ensure_key_loaded():
             return
 
         input_path = self.file_input_var.get().strip()
