@@ -21,8 +21,8 @@ sudo dnf install python3-tkinter
 # Arch
 sudo pacman -S tk
 
-# macOS (Homebrew) — usually included, but if missing:
-brew install python-tk
+# macOS (Homebrew) — match your Python version:
+brew install python-tk@3.13
 ```
 
 ### Setup
@@ -32,8 +32,11 @@ git clone https://github.com/skylordafk/pii-pseudonymizer.git
 cd pii-pseudonymizer
 python3 -m venv .venv
 source .venv/bin/activate
+pip install --upgrade pip
 pip install -e .
 ```
+
+> **Note:** If you're on an older pip (< 21.3), the `pip install --upgrade pip` step is important — older versions can't do editable installs from `pyproject.toml` alone.
 
 ## Quick Start
 
@@ -81,7 +84,7 @@ For decrypting individual values or files through a graphical interface:
 pii-decrypt-gui
 ```
 
-Browse to your key file, enter your passphrase, and decrypt single values or entire files.
+Browse to your key file, enter your passphrase, and decrypt single values or entire files. The GUI auto-loads the key when you click Decrypt, auto-selects the correct PII type for each column, and accepts encrypted values with or without brackets.
 
 > Requires tkinter — see [Prerequisites](#prerequisites) above if you get a "no module named tkinter" error.
 
