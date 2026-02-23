@@ -100,6 +100,9 @@ class Obfuscator:
 
         match = OBFUSCATED_PATTERN.match(str_val)
         if not match:
+            # Try adding brackets — user may have pasted without them
+            match = OBFUSCATED_PATTERN.match(f"[{str_val}]")
+        if not match:
             return obfuscated  # Not an obfuscated value
 
         encoded = match.group(2)
