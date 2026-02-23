@@ -906,7 +906,8 @@ def run_decrypt_value(args):
     print(result)
 
 
-def main():
+def _build_main_parser():
+    """Build the argument parser for the main workflow (everything except decrypt-value)."""
     parser = argparse.ArgumentParser(
         description=(
             "PII Pseudonymizer — detect and reversibly pseudonymize sensitive data in Excel files"
@@ -935,25 +936,6 @@ Examples:
 """,
     )
 
-    subparsers = parser.add_subparsers(dest="command")
-
-    # decrypt-value subcommand
-    dv_parser = subparsers.add_parser(
-        "decrypt-value",
-        help="Decrypt a single pseudonymized value",
-    )
-    dv_parser.add_argument("value", help="The pseudonymized value (e.g. [NAME:base64...])")
-    dv_parser.add_argument("--keyfile", "-k", required=True, help="Key file path (.json)")
-    dv_parser.add_argument("--column", required=True, help="Column name")
-    dv_parser.add_argument("--pii-type", required=True, help="PII type (name, email, etc.)")
-    dv_parser.add_argument(
-        "--passphrase-fd",
-        type=int,
-        default=None,
-        help="Read passphrase from this file descriptor",
-    )
-
-    # Main arguments (for non-subcommand usage)
     parser.add_argument("input", nargs="?", help="Path to .xlsx file")
     parser.add_argument("--output", "-o", help="Output file path")
     parser.add_argument("--keyfile", "-k", help="Key file path (.json)")
@@ -1023,12 +1005,39 @@ Examples:
         help="Path to allowlist/denylist JSON file",
     )
 
-    args = parser.parse_args()
+    return parser
 
-    # Handle decrypt-value subcommand
-    if args.command == "decrypt-value":
+
+def _build_decrypt_value_parser():
+    """Build the argument parser for the decrypt-value subcommand."""
+    parser = argparse.ArgumentParser(
+        prog="pii-pseudonymizer decrypt-value",
+        description="Decrypt a single pseudonymized value",
+    )
+    parser.add_argument("value", help="The pseudonymized value (e.g. [NAME:base64...])")
+    parser.add_argument("--keyfile", "-k", required=True, help="Key file path (.json)")
+    parser.add_argument("--column", required=True, help="Column name")
+    parser.add_argument("--pii-type", required=True, help="PII type (name, email, etc.)")
+    parser.add_argument(
+        "--passphrase-fd",
+        type=int,
+        default=None,
+        help="Read passphrase from this file descriptor",
+    )
+    return parser
+
+
+def main():
+    # Route decrypt-value subcommand to its own parser to avoid
+    # argparse conflict between subparsers and optional positionals
+    if len(sys.argv) > 1 and sys.argv[1] == "decrypt-value":
+        parser = _build_decrypt_value_parser()
+        args = parser.parse_args(sys.argv[2:])
         run_decrypt_value(args)
         return
+
+    parser = _build_main_parser()
+    args = parser.parse_args()
 
     if not args.input:
         parser.print_help()
