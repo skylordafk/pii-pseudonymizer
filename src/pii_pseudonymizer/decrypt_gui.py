@@ -5,8 +5,23 @@ Launch with: python -m pii_pseudonymizer.decrypt_gui
 """
 
 import os
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+import sys
+
+try:
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, ttk
+except ImportError:
+    print("Error: tkinter is not installed.")
+    print()
+    print("tkinter is a system package and cannot be installed with pip.")
+    print("Install it for your OS:")
+    print()
+    print("  Ubuntu/Debian:  sudo apt install python3-tk")
+    print("  Fedora/RHEL:    sudo dnf install python3-tkinter")
+    print("  Arch:           sudo pacman -S tk")
+    print("  macOS (brew):   brew install python-tk")
+    print()
+    sys.exit(1)
 
 
 class DecryptGUI:
