@@ -7,8 +7,10 @@ import openpyxl
 import pytest
 
 from pii_pseudonymizer.heuristics import analyze_all_columns
+from pii_pseudonymizer.decoder import decode_file
 from pii_pseudonymizer.obfuscator import Obfuscator
-from pii_pseudonymizer.reader import read_all_rows, read_xlsx, write_xlsx
+from pii_pseudonymizer.reader import read_all_rows, read_xlsx, transform_workbook, write_xlsx
+from pii_pseudonymizer.transforms import ReadableTransformer
 
 
 @pytest.fixture
@@ -225,3 +227,64 @@ class TestFullRoundTrip:
 
         for sname in metadata["sheet_names"]:
             assert out_meta["sheets"][sname]["row_count"] == metadata["sheets"][sname]["row_count"]
+
+    def test_formula_cells_preserved_after_obfuscation(self, test_workbook, temp_paths):
+        """Pseudonymization should not overwrite formula expressions."""
+        passphrase = "test-formula-preserve"
+        obfuscator = Obfuscator(passphrase)
+
+        sheets_columns = {
+            "Employees": [{"name": "email", "pii_type": "email"}],
+        }
+
+        transform_workbook(
+            test_workbook,
+            temp_paths["output"],
+            sheets_columns,
+            lambda value, col_name, pii_type, _sheet: obfuscator.obfuscate_value(
+                value, col_name, pii_type
+            ),
+        )
+
+        wb = openpyxl.load_workbook(temp_paths["output"], data_only=False)
+        try:
+            payroll = wb["Payroll"]
+            summary = wb["Summary"]
+            assert str(payroll["B2"].value).startswith("=VLOOKUP(")
+            assert str(summary["B2"].value).startswith("=COUNTA(")
+        finally:
+            wb.close()
+
+    def test_readable_verify_only_passes(self, temp_paths):
+        """Readable format should pass verify-only decode checks."""
+        passphrase = "test-readable-verify"
+        obfuscator = Obfuscator(passphrase)
+        transformer = ReadableTransformer(obfuscator.master_key[:32])
+
+        headers = ["first_name", "department"]
+        rows = [
+            {"first_name": "Alice", "department": "Engineering"},
+            {"first_name": "Bob", "department": "Marketing"},
+        ]
+        cols = [{"name": "first_name", "pii_type": "name"}]
+
+        transformed_rows = transformer.transform_rows(headers, rows, cols)
+        write_xlsx(temp_paths["output"], {"Sheet1": (headers, transformed_rows)})
+        obfuscator.save_key_file(
+            temp_paths["key"],
+            "test.xlsx",
+            {"Sheet1": cols},
+            output_format="readable",
+            readable_mappings=transformer.get_mappings(),
+        )
+
+        result = decode_file(
+            temp_paths["output"],
+            temp_paths["key"],
+            passphrase,
+            output_path=None,
+            verify_only=True,
+        )
+
+        assert result["status"] == "success"
+        assert result["round_trip_ok"] is True

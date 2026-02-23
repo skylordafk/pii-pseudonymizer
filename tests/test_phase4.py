@@ -167,3 +167,62 @@ class TestOllamaPerColumnSchema:
         assert "name" in context[0]
         assert "pii_type" in context[0]
         assert "confidence" in context[0]
+
+
+class TestOllamaClientConfig:
+    """Configurable Ollama options should be applied to API payloads."""
+
+    def test_chat_uses_client_defaults(self, monkeypatch):
+        from pii_pseudonymizer.ollama_client import OllamaClient
+
+        captured = {}
+
+        class FakeResp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"message": {"content": "{}"}}
+
+        def fake_post(url, json, timeout):
+            captured["url"] = url
+            captured["json"] = json
+            captured["timeout"] = timeout
+            return FakeResp()
+
+        monkeypatch.setattr("pii_pseudonymizer.ollama_client.requests.post", fake_post)
+
+        client = OllamaClient(num_ctx=4096, temperature=0.25)
+        client.chat([{"role": "user", "content": "hi"}], timeout=12)
+
+        assert captured["json"]["options"]["num_ctx"] == 4096
+        assert captured["json"]["options"]["temperature"] == 0.25
+        assert captured["timeout"] == 12
+
+    def test_chat_allows_per_request_overrides(self, monkeypatch):
+        from pii_pseudonymizer.ollama_client import OllamaClient
+
+        captured = {}
+
+        class FakeResp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"message": {"content": "{}"}}
+
+        def fake_post(url, json, timeout):
+            captured["json"] = json
+            return FakeResp()
+
+        monkeypatch.setattr("pii_pseudonymizer.ollama_client.requests.post", fake_post)
+
+        client = OllamaClient(num_ctx=2048, temperature=0)
+        client.chat(
+            [{"role": "user", "content": "hi"}],
+            num_ctx=1024,
+            temperature=0.1,
+        )
+
+        assert captured["json"]["options"]["num_ctx"] == 1024
+        assert captured["json"]["options"]["temperature"] == 0.1

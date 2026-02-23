@@ -259,3 +259,24 @@ class TestKeyFile:
 
         finally:
             os.unlink(key_path)
+
+    def test_custom_iteration_count_persists_in_keyfile(self):
+        """Configured PBKDF2 iterations should be preserved and reused on load."""
+        passphrase = "test-custom-iterations"
+        obfuscator = Obfuscator(passphrase, iterations=123456)
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            key_path = f.name
+
+        try:
+            sheets_columns = {"Sheet1": [{"name": "email", "pii_type": "email"}]}
+            obfuscator.save_key_file(key_path, "test.xlsx", sheets_columns)
+
+            with open(key_path) as f:
+                raw = json.load(f)
+            assert raw["iterations"] == 123456
+
+            loaded_obfuscator, _ = Obfuscator.from_key_file(key_path, passphrase)
+            assert loaded_obfuscator.iterations == 123456
+        finally:
+            os.unlink(key_path)

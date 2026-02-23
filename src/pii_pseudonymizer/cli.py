@@ -3,7 +3,6 @@
 import argparse
 import getpass
 import os
-import random
 import socket
 import sys
 from datetime import datetime
@@ -13,7 +12,7 @@ from pii_pseudonymizer.decoder import decode_file
 from pii_pseudonymizer.detector import PIIDetector
 from pii_pseudonymizer.obfuscator import Obfuscator
 from pii_pseudonymizer.ollama_client import OllamaClient
-from pii_pseudonymizer.reader import read_all_rows, read_xlsx, write_xlsx
+from pii_pseudonymizer.reader import read_all_rows, read_xlsx, transform_workbook
 from pii_pseudonymizer.tui import confirm_columns_tui
 
 
@@ -182,16 +181,12 @@ def confirm_columns(all_results):
     return all_results
 
 
-def get_passphrase(passphrase_fd=None):
-    """Get passphrase from user with confirmation, or from file descriptor."""
-    # Check environment variable first
-    env_passphrase = os.environ.get("PII_PASSPHRASE")
+def _passphrase_from_env_or_fd(passphrase_fd=None):
+    """Read passphrase from env var or file descriptor. Returns None if unavailable."""
+    env_passphrase = os.environ.pop("PII_PASSPHRASE", None)
     if env_passphrase:
-        # Clear from environment immediately
-        del os.environ["PII_PASSPHRASE"]
         return env_passphrase
 
-    # Read from file descriptor if specified
     if passphrase_fd is not None:
         try:
             with os.fdopen(passphrase_fd, "r", closefd=False) as f:
@@ -199,6 +194,15 @@ def get_passphrase(passphrase_fd=None):
         except OSError as e:
             print(f"  Error reading passphrase from fd {passphrase_fd}: {e}")
             sys.exit(1)
+
+    return None
+
+
+def get_passphrase(passphrase_fd=None):
+    """Get passphrase from user with confirmation, or from file descriptor."""
+    passphrase = _passphrase_from_env_or_fd(passphrase_fd)
+    if passphrase is not None:
+        return passphrase
 
     # Interactive input
     while True:
@@ -220,23 +224,22 @@ def get_passphrase(passphrase_fd=None):
 def check_network_connectivity():
     """Check if network is available. Returns True if connected."""
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(1)
-        sock.connect(("1.1.1.1", 443))
-        sock.close()
+        with socket.create_connection(("1.1.1.1", 443), timeout=1):
+            pass
         return True
-    except (OSError, TimeoutError):
+    except OSError:
         return False
 
 
 def _search_cells(input_path, term):
     """Search all cells in a file for a term. Returns (all_sheets, found_list)."""
+    term_lower = term.lower()
     all_sheets = read_all_rows(input_path)
     found = []
     for sname, (_headers, rows) in all_sheets.items():
         for row_idx, row in enumerate(rows, 2):  # row 2 = first data row
             for col_name, value in row.items():
-                if value is not None and term.lower() in str(value).lower():
+                if value is not None and term_lower in str(value).lower():
                     found.append(
                         {
                             "sheet": sname,
@@ -310,7 +313,7 @@ def run_search(args):
         sys.exit(1)
 
     print(f"\n  Searching for '{term}' in {os.path.basename(input_path)}...")
-    _all_sheets, found = _search_cells(input_path, term)
+    _, found = _search_cells(input_path, term)
 
     if not found:
         print(f"  No occurrences of '{term}' found.")
@@ -344,7 +347,7 @@ def run_ctrlf_pseudonymize(args, config):
             sys.exit(1)
 
     print(f"\n  Searching for '{term}' in {os.path.basename(input_path)}...")
-    all_sheets, found = _search_cells(input_path, term)
+    _, found = _search_cells(input_path, term)
 
     if not found:
         print(f"  No occurrences of '{term}' found. Nothing to do.")
@@ -383,9 +386,13 @@ def run_ctrlf_pseudonymize(args, config):
         "(name, email, phone, ssn, address, dob, generic) [generic]: ",
         end="",
     )
+    valid_pii_types = {"name", "email", "phone", "ssn", "address", "dob", "generic"}
     try:
         pii_type = input().strip().lower() or "generic"
     except (EOFError, KeyboardInterrupt):
+        pii_type = "generic"
+    if pii_type not in valid_pii_types:
+        print(f"  Unrecognized type '{pii_type}', defaulting to 'generic'.")
         pii_type = "generic"
 
     # Get passphrase
@@ -393,7 +400,7 @@ def run_ctrlf_pseudonymize(args, config):
     passphrase = get_passphrase(args.passphrase_fd)
 
     output_format = args.output_format
-    obfuscator = Obfuscator(passphrase)
+    obfuscator = Obfuscator(passphrase, iterations=config.pbkdf2_iterations)
 
     readable_transformer = None
     if output_format == "readable":
@@ -413,27 +420,18 @@ def run_ctrlf_pseudonymize(args, config):
             sheets_columns[sname] = []
         sheets_columns[sname].append({"name": col_name, "pii_type": pii_type})
 
-    # Pseudonymize only matching cells
+    def _transform_cell(value, column_name, value_pii_type, sheet_name):
+        if readable_transformer:
+            return readable_transformer.transform_value(
+                value,
+                column_name,
+                value_pii_type,
+                sheet_name=sheet_name,
+            )
+        return obfuscator.obfuscate_value(value, column_name, value_pii_type)
+
+    # Pseudonymize only matching cells while preserving workbook structure.
     print("\n  Pseudonymizing...")
-    output_sheets = {}
-    total_cells = 0
-    for sname, (headers, rows) in all_sheets.items():
-        new_rows = []
-        for row_idx, row in enumerate(rows):
-            new_row = dict(row)
-            for col_name in headers:
-                if (sname, row_idx, col_name) in cells_to_pseudonymize:
-                    val = new_row.get(col_name)
-                    if val is not None:
-                        if readable_transformer:
-                            new_row[col_name] = readable_transformer.transform_value(
-                                val, col_name, pii_type
-                            )
-                        else:
-                            new_row[col_name] = obfuscator.obfuscate_value(val, col_name, pii_type)
-                        total_cells += 1
-            new_rows.append(new_row)
-        output_sheets[sname] = (headers, new_rows)
 
     # Output paths
     if args.output:
@@ -446,7 +444,13 @@ def run_ctrlf_pseudonymize(args, config):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     key_path = args.keyfile or os.path.join(config.keys_directory, f"key_{timestamp}.json")
 
-    write_xlsx(output_path, output_sheets)
+    stats = transform_workbook(
+        input_path,
+        output_path,
+        sheets_columns,
+        _transform_cell,
+        target_cells=cells_to_pseudonymize,
+    )
     readable_mappings = readable_transformer.get_mappings() if readable_transformer else None
     obfuscator.save_key_file(
         key_path,
@@ -456,7 +460,7 @@ def run_ctrlf_pseudonymize(args, config):
         readable_mappings=readable_mappings,
     )
 
-    print(f"  Pseudonymized {total_cells} cell(s)")
+    print(f"  Pseudonymized {stats['transformed_cells']} cell(s)")
     print(f"  Output: {output_path}")
     print(f"  Key file: {key_path}")
     print()
@@ -489,7 +493,7 @@ def run_obfuscate(args, config):
     # Step 1: Read file (all sheets)
     print_step(1, total_steps, "Reading file...")
     try:
-        metadata = read_xlsx(input_path)
+        metadata = read_xlsx(input_path, max_sample_values=config.max_sample_values)
     except Exception as e:
         print(f"  Error reading file: {e}")
         sys.exit(1)
@@ -531,27 +535,41 @@ def run_obfuscate(args, config):
     # Try to connect to Ollama
     ollama = None
     if not args.no_llm:
-        model = args.model or config.default_model
-        client = OllamaClient(
-            base_url=config.ollama_url,
-            model=model,
-        )
-        healthy, msg = client.health_check()
-        if healthy:
-            ollama = client
-            print(f"  Ollama connected (model: {model})")
-            print("  Warming up model (first call may take a moment)...")
-            try:
-                client.chat(
-                    [{"role": "user", "content": "Reply OK"}],
-                    temperature=0,
-                    timeout=config.timeout_seconds,
-                )
-                print("  Model ready.")
-            except Exception:
-                print("  Model warm-up timed out, but will continue.")
-        else:
-            print(f"  Ollama not available: {msg}")
+        model_candidates = [args.model or config.default_model]
+        if not args.model and config.fallback_model and config.fallback_model not in model_candidates:
+            model_candidates.append(config.fallback_model)
+
+        last_error = None
+        for idx, model in enumerate(model_candidates):
+            client = OllamaClient(
+                base_url=config.ollama_url,
+                model=model,
+                num_ctx=config.num_ctx,
+                temperature=config.temperature,
+            )
+            healthy, msg = client.health_check()
+            if healthy:
+                ollama = client
+                print(f"  Ollama connected (model: {model})")
+                print("  Warming up model (first call may take a moment)...")
+                try:
+                    client.chat(
+                        [{"role": "user", "content": "Reply OK"}],
+                        temperature=config.temperature,
+                        timeout=config.timeout_seconds,
+                    )
+                    print("  Model ready.")
+                except Exception:
+                    print("  Model warm-up timed out, but will continue.")
+                break
+
+            last_error = msg
+            if idx < len(model_candidates) - 1:
+                print(f"  Model '{model}' unavailable: {msg}")
+                print(f"  Trying fallback model '{model_candidates[idx + 1]}'...")
+
+        if not ollama:
+            print(f"  Ollama not available: {last_error}")
             print("  Continuing with heuristics only.")
     else:
         print("  Skipping LLM analysis (--no-llm flag)")
@@ -564,7 +582,13 @@ def run_obfuscate(args, config):
             f"{len(lists['never_pii'])} never-PII"
         )
 
-    detector = PIIDetector(ollama_client=ollama, thorough=args.thorough, lists=lists)
+    detector = PIIDetector(
+        ollama_client=ollama,
+        thorough=args.thorough,
+        lists=lists,
+        thorough_num_ctx=config.num_ctx,
+        llm_timeout=max(config.timeout_seconds, 120),
+    )
 
     # Run detection per sheet
     all_results = {}
@@ -610,7 +634,7 @@ def run_obfuscate(args, config):
     column_samples = {}
     for sname in sheet_names:
         for col in metadata["sheets"][sname].get("columns", []):
-            column_samples[col["name"]] = col.get("samples", [])[:3]
+            column_samples[(sname, col["name"])] = col.get("samples", [])[:3]
 
     all_results = confirm_columns_tui(all_results, column_samples)
 
@@ -653,8 +677,7 @@ def run_obfuscate(args, config):
     # Step 5: Obfuscate (all sheets)
     print_step(5, total_steps, "Pseudonymizing...")
 
-    all_sheets_data = read_all_rows(input_path)
-    obfuscator = Obfuscator(passphrase)
+    obfuscator = Obfuscator(passphrase, iterations=config.pbkdf2_iterations)
     output_format = args.output_format
 
     # Set up transformer based on format
@@ -664,37 +687,30 @@ def run_obfuscate(args, config):
 
         readable_transformer = ReadableTransformer(obfuscator.master_key[:32])
 
-    obfuscated_sheets = {}
-    total_processed = 0
-    for sname in metadata["sheet_names"]:
-        if sname not in all_sheets_data:
-            continue
-        headers, rows = all_sheets_data[sname]
-        if sname in sheets_columns:
-            if readable_transformer:
-                obf_rows = readable_transformer.transform_rows(headers, rows, sheets_columns[sname])
-            else:
-                obf_rows = obfuscator.obfuscate_rows(headers, rows, sheets_columns[sname])
+    # Collect transformed samples for post-write verification.
+    sample_pairs = {}
 
-            # Apply cell-level exclusions: restore original values for excluded cells
-            col_exclusions = sheets_exclusions.get(sname, {})
-            if col_exclusions:
-                excluded_count = 0
-                for orig_row, obf_row in zip(rows, obf_rows, strict=True):
-                    for col_name, excl_values in col_exclusions.items():
-                        orig_val = orig_row.get(col_name)
-                        if orig_val is not None and str(orig_val).strip() in excl_values:
-                            obf_row[col_name] = orig_val
-                            excluded_count += 1
-                if excluded_count:
-                    print(f"    {sname}: {excluded_count} cell(s) excluded from obfuscation")
+    def _record_sample(sheet_name, column_name, pii_type, original, transformed):
+        key = (sheet_name, column_name, pii_type)
+        if key not in sample_pairs:
+            sample_pairs[key] = []
+        if len(sample_pairs[key]) < 50:
+            sample_pairs[key].append((original, transformed))
 
-            obfuscated_sheets[sname] = (headers, obf_rows)
-            total_processed += len(rows)
-            print(f"    {sname}: {len(rows):,} rows, {len(sheets_columns[sname])} column(s)")
+    def _transform_cell(value, column_name, pii_type, sheet_name):
+        if readable_transformer:
+            transformed = readable_transformer.transform_value(
+                value,
+                column_name,
+                pii_type,
+                sheet_name=sheet_name,
+            )
         else:
-            # Pass through unchanged
-            obfuscated_sheets[sname] = (headers, rows)
+            transformed = obfuscator.obfuscate_value(value, column_name, pii_type)
+
+        if transformed != value:
+            _record_sample(sheet_name, column_name, pii_type, value, transformed)
+        return transformed
 
     # Determine output paths
     if args.output:
@@ -720,8 +736,27 @@ def run_obfuscate(args, config):
         print(f"  --keyfile with a path outside the project (default: {config.keys_directory})")
         print()
 
-    # Write output (all sheets)
-    write_xlsx(output_path, obfuscated_sheets)
+    stats = transform_workbook(
+        input_path,
+        output_path,
+        sheets_columns,
+        _transform_cell,
+        exclusions=sheets_exclusions,
+    )
+
+    total_processed = 0
+    for sname in metadata["sheet_names"]:
+        if sname not in sheets_columns:
+            continue
+        row_count = metadata["sheets"][sname]["row_count"]
+        total_processed += row_count
+        sstats = stats["sheets"].get(sname, {})
+        transformed_cells = sstats.get("transformed_cells", 0)
+        print(
+            f"    {sname}: {row_count:,} rows, {len(sheets_columns[sname])} column(s), "
+            f"{transformed_cells} cell(s) transformed"
+        )
+
     readable_mappings = readable_transformer.get_mappings() if readable_transformer else None
     # Convert exclusion sets to lists for JSON serialization
     serializable_exclusions = {
@@ -746,54 +781,30 @@ def run_obfuscate(args, config):
     print_step(6, total_steps, "Verification...")
 
     all_ok = True
-    for sname in sheets_columns:
-        if sname not in all_sheets_data or sname not in obfuscated_sheets:
-            continue
-        _orig_headers, orig_rows = all_sheets_data[sname]
-        _, obf_rows = obfuscated_sheets[sname]
-        cols = sheets_columns[sname]
-        col_exclusions = sheets_exclusions.get(sname, {})
+    for (sheet_name, col_name, pii_type), pairs in sample_pairs.items():
+        for original, transformed in pairs:
+            if readable_transformer:
+                reversed_val = readable_transformer.reverse_value(
+                    transformed,
+                    col_name,
+                    pii_type,
+                    sheet_name=sheet_name,
+                )
+                if str(reversed_val).strip() != str(original).strip():
+                    all_ok = False
+                    break
+            else:
+                re_obfuscated = obfuscator.obfuscate_value(original, col_name, pii_type)
+                if str(re_obfuscated) != str(transformed):
+                    all_ok = False
+                    break
 
-        sample_size = min(50, len(orig_rows))
-        indices = (
-            random.sample(range(len(orig_rows)), sample_size)
-            if len(orig_rows) > sample_size
-            else range(len(orig_rows))
-        )
-
-        for idx in indices:
-            for col in cols:
-                col_name = col["name"]
-                pii_type = col["pii_type"]
-                original = orig_rows[idx].get(col_name)
-                obfuscated = obf_rows[idx].get(col_name)
-
-                if original is None or str(original).strip() == "":
-                    continue
-
-                # Skip verification for excluded cells
-                excl_values = col_exclusions.get(col_name, set())
-                if str(original).strip() in excl_values:
-                    continue
-
-                if readable_transformer:
-                    # For readable mode, verify the mapping reverses correctly
-                    reversed_val = readable_transformer.reverse_value(
-                        obfuscated, col_name, pii_type
-                    )
-                    if str(reversed_val) != str(original).strip():
-                        all_ok = False
-                        break
-                else:
-                    re_obfuscated = obfuscator.obfuscate_value(original, col_name, pii_type)
-                    if str(re_obfuscated) != str(obfuscated):
-                        all_ok = False
-                        break
-
-                    decoded = obfuscator.deobfuscate_value(obfuscated, col_name, pii_type)
-                    if str(decoded) != str(original).strip():
-                        all_ok = False
-                        break
+                decoded = obfuscator.deobfuscate_value(transformed, col_name, pii_type)
+                if str(decoded) != str(original).strip():
+                    all_ok = False
+                    break
+        if not all_ok:
+            break
 
     if all_ok:
         print(
@@ -815,19 +826,8 @@ def run_decode(args):
         print("  Error: --keyfile is required for decode mode.")
         sys.exit(1)
 
-    # Get passphrase
-    env_passphrase = os.environ.get("PII_PASSPHRASE")
-    if env_passphrase:
-        passphrase = env_passphrase
-        del os.environ["PII_PASSPHRASE"]
-    elif args.passphrase_fd is not None:
-        try:
-            with os.fdopen(args.passphrase_fd, "r", closefd=False) as f:
-                passphrase = f.readline().rstrip("\n")
-        except OSError as e:
-            print(f"  Error reading passphrase from fd {args.passphrase_fd}: {e}")
-            sys.exit(1)
-    else:
+    passphrase = _passphrase_from_env_or_fd(args.passphrase_fd)
+    if passphrase is None:
         passphrase = getpass.getpass("  Enter passphrase: ")
 
     def _decode_progress(sheet_name, sheet_idx, total_sheets):
@@ -881,19 +881,8 @@ def run_decrypt_value(args):
         print("  Error: --pii-type is required for decrypt-value.")
         sys.exit(1)
 
-    # Get passphrase
-    env_passphrase = os.environ.get("PII_PASSPHRASE")
-    if env_passphrase:
-        passphrase = env_passphrase
-        del os.environ["PII_PASSPHRASE"]
-    elif args.passphrase_fd is not None:
-        try:
-            with os.fdopen(args.passphrase_fd, "r", closefd=False) as f:
-                passphrase = f.readline().rstrip("\n")
-        except OSError as e:
-            print(f"  Error reading passphrase from fd {args.passphrase_fd}: {e}")
-            sys.exit(1)
-    else:
+    passphrase = _passphrase_from_env_or_fd(args.passphrase_fd)
+    if passphrase is None:
         passphrase = getpass.getpass("  Enter passphrase: ")
 
     try:

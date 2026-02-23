@@ -1,5 +1,6 @@
 """XLSX file reading and writing with openpyxl — multi-sheet + formula detection."""
 
+import os
 import re
 
 import openpyxl
@@ -9,7 +10,7 @@ import openpyxl
 _SHEET_REF_PATTERN = re.compile(r"(?:'([^']+)'|([A-Za-z0-9_]+))!")
 
 
-def read_xlsx(filepath):
+def read_xlsx(filepath, max_sample_values=10):
     """
     Read an xlsx file and return structured metadata for ALL sheets.
 
@@ -34,9 +35,10 @@ def read_xlsx(filepath):
     sheets = {}
     for sname in sheet_names:
         ws = wb_data[sname]
-        rows = list(ws.iter_rows(values_only=True))
+        rows_iter = ws.iter_rows(values_only=True)
+        header_row = next(rows_iter, None)
 
-        if not rows:
+        if not header_row:
             sheets[sname] = {
                 "headers": [],
                 "row_count": 0,
@@ -44,16 +46,36 @@ def read_xlsx(filepath):
             }
             continue
 
-        headers = [str(h) if h is not None else f"Column_{i + 1}" for i, h in enumerate(rows[0])]
-        data_rows = rows[1:]
+        headers = [str(h) if h is not None else f"Column_{i + 1}" for i, h in enumerate(header_row)]
+
+        col_stats = [
+            {
+                "null_count": 0,
+                "samples": [],
+                "dtype_values": [],
+            }
+            for _ in headers
+        ]
+        row_count = 0
+
+        for row in rows_iter:
+            row_count += 1
+            for col_idx in range(len(headers)):
+                value = row[col_idx] if col_idx < len(row) else None
+                if value is None or str(value).strip() == "":
+                    col_stats[col_idx]["null_count"] += 1
+                    continue
+
+                if len(col_stats[col_idx]["samples"]) < max_sample_values:
+                    col_stats[col_idx]["samples"].append(str(value))
+                if len(col_stats[col_idx]["dtype_values"]) < 20:
+                    col_stats[col_idx]["dtype_values"].append(value)
 
         columns = []
         for col_idx, header in enumerate(headers):
-            values = [row[col_idx] for row in data_rows if col_idx < len(row)]
-            non_null = [v for v in values if v is not None and str(v).strip() != ""]
-            null_count = len(values) - len(non_null)
-            samples = [str(v) for v in non_null[:10]]
-            dtype_guess = _guess_dtype(non_null[:20])
+            null_count = col_stats[col_idx]["null_count"]
+            samples = col_stats[col_idx]["samples"]
+            dtype_guess = _guess_dtype(col_stats[col_idx]["dtype_values"])
 
             columns.append(
                 {
@@ -61,14 +83,14 @@ def read_xlsx(filepath):
                     "name": header,
                     "samples": samples,
                     "null_count": null_count,
-                    "total_count": len(values),
+                    "total_count": row_count,
                     "dtype_guess": dtype_guess,
                 }
             )
 
         sheets[sname] = {
             "headers": headers,
-            "row_count": len(data_rows),
+            "row_count": row_count,
             "columns": columns,
         }
 
@@ -214,8 +236,6 @@ def write_xlsx(filepath, sheets_data, single_sheet=None):
         single_sheet: if provided, treat sheets_data as a single (headers, rows)
                       tuple and write it under this sheet name
     """
-    import os
-
     os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
 
     wb = openpyxl.Workbook()
@@ -248,6 +268,101 @@ def _write_sheet(ws, headers, rows):
         for col_idx, header in enumerate(headers, 1):
             value = row_dict.get(header)
             ws.cell(row=row_idx, column=col_idx, value=value)
+
+
+def transform_workbook(
+    input_path,
+    output_path,
+    sheets_columns,
+    transform_value,
+    exclusions=None,
+    target_cells=None,
+):
+    """Apply value transforms while preserving workbook structure/styles/formulas.
+
+    Args:
+        input_path: source workbook path
+        output_path: destination workbook path
+        sheets_columns: dict of sheet_name -> list of {'name', 'pii_type'}
+        transform_value: callable(value, column_name, pii_type, sheet_name) -> new value
+        exclusions: optional dict of sheet_name -> dict of column -> set/list of excluded values
+        target_cells: optional set of (sheet_name, row_index, column_name) tuples where
+                      row_index is 0-based relative to the first data row
+
+    Returns:
+        dict with per-sheet stats and total transformed cell count.
+    """
+    wb = openpyxl.load_workbook(input_path, data_only=False)
+    stats = {"sheets": {}, "transformed_cells": 0}
+
+    try:
+        for ws in wb.worksheets:
+            sheet_name = ws.title
+            column_specs = sheets_columns.get(sheet_name, [])
+
+            if not column_specs:
+                continue
+
+            header_positions = _build_header_positions(ws)
+            row_count = max(ws.max_row - 1, 0)
+            transformed = 0
+
+            sheet_exclusions = (exclusions or {}).get(sheet_name, {})
+
+            for row_num in range(2, ws.max_row + 1):
+                row_index = row_num - 2  # 0-based data row index
+
+                for col in column_specs:
+                    col_name = col["name"]
+                    pii_type = col["pii_type"]
+
+                    if target_cells is not None and (sheet_name, row_index, col_name) not in target_cells:
+                        continue
+
+                    excluded = sheet_exclusions.get(col_name, ())
+                    col_indexes = header_positions.get(col_name, ())
+                    for col_num in col_indexes:
+                        cell = ws.cell(row=row_num, column=col_num)
+                        value = cell.value
+                        if value is None:
+                            continue
+                        # Preserve formulas exactly as written.
+                        if isinstance(value, str) and value.startswith("="):
+                            continue
+
+                        if excluded and str(value).strip() in excluded:
+                            continue
+
+                        new_value = transform_value(value, col_name, pii_type, sheet_name)
+                        if new_value != value:
+                            cell.value = new_value
+                            transformed += 1
+
+            stats["sheets"][sheet_name] = {
+                "row_count": row_count,
+                "column_count": len(column_specs),
+                "transformed_cells": transformed,
+            }
+            stats["transformed_cells"] += transformed
+
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        wb.save(output_path)
+        return stats
+    finally:
+        wb.close()
+
+
+def _build_header_positions(ws):
+    """Build a header -> list[column_index] map for a worksheet."""
+    if ws.max_row < 1:
+        return {}
+
+    positions = {}
+    for col_num in range(1, ws.max_column + 1):
+        header_value = ws.cell(row=1, column=col_num).value
+        header = str(header_value) if header_value is not None else f"Column_{col_num}"
+        positions.setdefault(header, []).append(col_num)
+    return positions
 
 
 def _guess_dtype(values):

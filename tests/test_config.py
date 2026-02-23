@@ -59,3 +59,15 @@ class TestConfig:
             assert not hasattr(config, "unknown_key")
         finally:
             os.unlink(path)
+
+    def test_load_expands_user_in_keys_directory(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({"keys_directory": "~/.config/pii-pseudonymizer/keys"}, f)
+            path = f.name
+
+        try:
+            config = Config.load(path)
+            assert "~" not in config.keys_directory
+            assert config.keys_directory.endswith(".config/pii-pseudonymizer/keys")
+        finally:
+            os.unlink(path)

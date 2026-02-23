@@ -114,7 +114,9 @@ def confirm_columns_tui(all_results, column_samples=None):
 
     Args:
         all_results: dict of sheet_name -> list of result dicts
-        column_samples: optional dict of column_name -> list of sample values
+        column_samples: optional dict mapping (sheet_name, column_name) tuples
+                        to sample values. For backward compatibility, plain
+                        column_name keys are also accepted.
 
     Returns:
         modified all_results dict
@@ -123,9 +125,12 @@ def confirm_columns_tui(all_results, column_samples=None):
 
     # Inject samples into results for display
     if column_samples:
-        for _sname, results in all_results.items():
+        for sname, results in all_results.items():
             for r in results:
-                if r["name"] in column_samples:
+                key = (sname, r["name"])
+                if key in column_samples:
+                    r["samples"] = column_samples[key]
+                elif r["name"] in column_samples:
                     r["samples"] = column_samples[r["name"]]
 
     # Display table

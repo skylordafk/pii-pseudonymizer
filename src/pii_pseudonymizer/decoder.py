@@ -4,8 +4,8 @@ import argparse
 import getpass
 import sys
 
-from pii_pseudonymizer.obfuscator import Obfuscator
-from pii_pseudonymizer.reader import read_all_rows, write_xlsx
+from pii_pseudonymizer.obfuscator import OBFUSCATED_PATTERN, Obfuscator
+from pii_pseudonymizer.reader import read_all_rows, transform_workbook
 
 
 def decode_file(
@@ -42,8 +42,7 @@ def decode_file(
         from pii_pseudonymizer.transforms import ReadableTransformer
 
         readable_transformer = ReadableTransformer(obfuscator.master_key[:32])
-        mappings = key_data.get("readable_mappings", {})
-        readable_transformer.load_mappings(mappings)
+        readable_transformer.load_mappings(key_data.get("readable_mappings", {}))
 
     # Read all sheets from the pseudonymized file
     all_sheets = read_all_rows(input_path)
@@ -51,7 +50,7 @@ def decode_file(
     total_rows = 0
     all_columns_decoded = []
     sheets_decoded = []
-    decoded_sheets = {}
+    sheets_to_decode = {}
     sample_ok = True
 
     total_sheets = len(sheets_info)
@@ -66,23 +65,23 @@ def decode_file(
             if info.get("obfuscated", False)
         ]
         if not columns_to_decode:
-            # Sheet had no obfuscated columns; copy through unchanged
-            if sheet_name in all_sheets:
-                decoded_sheets[sheet_name] = all_sheets[sheet_name]
             continue
 
         if sheet_name not in all_sheets:
             continue
 
+        sheets_to_decode[sheet_name] = columns_to_decode
+
         headers, rows = all_sheets[sheet_name]
         if not rows:
-            decoded_sheets[sheet_name] = (headers, rows)
             continue
 
         # Decode
         try:
             if readable_transformer:
-                decoded_rows = readable_transformer.reverse_rows(headers, rows, columns_to_decode)
+                decoded_rows = readable_transformer.reverse_rows(
+                    headers, rows, columns_to_decode, sheet_name=sheet_name
+                )
             else:
                 decoded_rows = obfuscator.deobfuscate_rows(headers, rows, columns_to_decode)
         except Exception as e:
@@ -97,22 +96,34 @@ def decode_file(
         for orig, decoded in zip(rows[:5], decoded_rows[:5], strict=True):
             for col in columns_to_decode:
                 col_name = col["name"]
-                if col_name in orig and orig[col_name] is not None:
+                if col_name not in orig or orig[col_name] is None:
+                    continue
+
+                orig_str = str(orig[col_name])
+                decoded_str = str(decoded.get(col_name))
+
+                # Plaintext passthrough (e.g. exclusions or non-token data).
+                if decoded_str == orig_str:
+                    continue
+
+                if readable_transformer:
+                    re_obfuscated = readable_transformer.transform_value(
+                        decoded[col_name], col_name, col["pii_type"], sheet_name=sheet_name
+                    )
+                else:
+                    if not OBFUSCATED_PATTERN.match(orig_str):
+                        sample_ok = False
+                        continue
                     re_obfuscated = obfuscator.obfuscate_value(
                         decoded[col_name], col_name, col["pii_type"]
                     )
-                    if str(re_obfuscated) != str(orig[col_name]):
-                        sample_ok = False
 
-        decoded_sheets[sheet_name] = (headers, decoded_rows)
+                if str(re_obfuscated) != orig_str:
+                    sample_ok = False
+
         total_rows += len(rows)
         all_columns_decoded.extend(f"{sheet_name}.{c['name']}" for c in columns_to_decode)
         sheets_decoded.append(sheet_name)
-
-    # Include any sheets not in the key file (pass through unchanged)
-    for sheet_name in all_sheets:
-        if sheet_name not in decoded_sheets:
-            decoded_sheets[sheet_name] = all_sheets[sheet_name]
 
     if verify_only:
         return {
@@ -131,7 +142,25 @@ def decode_file(
         else:
             output_path = input_path + "_decoded.xlsx"
 
-    write_xlsx(output_path, decoded_sheets)
+    def _decode_transform(value, column_name, pii_type, sheet_name):
+        if readable_transformer:
+            return readable_transformer.reverse_value(
+                value, column_name, pii_type, sheet_name=sheet_name
+            )
+        return obfuscator.deobfuscate_value(value, column_name, pii_type)
+
+    try:
+        transform_workbook(
+            input_path,
+            output_path,
+            sheets_to_decode,
+            _decode_transform,
+        )
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Failed to write decoded workbook: {e}",
+        }
 
     return {
         "status": "success",

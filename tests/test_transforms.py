@@ -191,3 +191,24 @@ class TestReadableKeyFileIntegration:
         finally:
             os.unlink(key_path)
             os.unlink(xlsx_path)
+
+
+class TestSheetScopedMappings:
+    """Readable mappings should support sheet-scoped columns with same names."""
+
+    def test_sheet_scoped_mapping_round_trip(self):
+        transformer = ReadableTransformer(b"test-key-for-transforms-32bytes!")
+
+        v1 = transformer.transform_value("Alice", "name", "name", sheet_name="Employees")
+        v2 = transformer.transform_value("Bob", "name", "name", sheet_name="Leads")
+
+        mappings = transformer.get_mappings()
+        assert "by_sheet" in mappings
+        assert "Employees" in mappings["by_sheet"]
+        assert "Leads" in mappings["by_sheet"]
+
+        restored = ReadableTransformer(b"test-key-for-transforms-32bytes!")
+        restored.load_mappings(mappings)
+
+        assert restored.reverse_value(v1, "name", "name", sheet_name="Employees") == "Alice"
+        assert restored.reverse_value(v2, "name", "name", sheet_name="Leads") == "Bob"

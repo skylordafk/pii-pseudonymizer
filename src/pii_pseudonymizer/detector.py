@@ -5,7 +5,14 @@ from pii_pseudonymizer.ollama_client import OllamaClient  # noqa: F401
 
 
 class PIIDetector:
-    def __init__(self, ollama_client=None, thorough=False, lists=None):
+    def __init__(
+        self,
+        ollama_client=None,
+        thorough=False,
+        lists=None,
+        thorough_num_ctx=4096,
+        llm_timeout=300,
+    ):
         """
         Args:
             ollama_client: OllamaClient instance, or None to skip LLM analysis
@@ -15,6 +22,8 @@ class PIIDetector:
         self.ollama = ollama_client
         self.thorough = thorough
         self.lists = lists or {"always_pii": [], "never_pii": []}
+        self.thorough_num_ctx = thorough_num_ctx
+        self.llm_timeout = llm_timeout
         # Context for thorough mode: tracks approved classifications
         self._approved_context = []
 
@@ -218,8 +227,8 @@ class PIIDetector:
             result = self.ollama.analyze_column_individual(
                 col,
                 context_examples=self._approved_context,
-                num_ctx=4096,
-                timeout=300,
+                num_ctx=self.thorough_num_ctx,
+                timeout=self.llm_timeout,
             )
             if result:
                 llm_results[result.get("name", col["name"])] = result

@@ -35,11 +35,12 @@ OBFUSCATED_PATTERN = re.compile(r"^\[([A-Z]+):([A-Za-z0-9_\-+=/.]+)\]$")
 
 
 class Obfuscator:
-    def __init__(self, passphrase, salt=None):
+    def __init__(self, passphrase, salt=None, iterations=PBKDF2_ITERATIONS):
         """
         Initialize with passphrase. If salt is None, generate a new one.
         Provide an existing salt when loading from a key file for decryption.
         """
+        self.iterations = iterations
         self.salt = salt if salt is not None else os.urandom(16)
         self.master_key = self._derive_key(passphrase, self.salt)
         self.cipher = AESSIV(self.master_key)
@@ -52,7 +53,7 @@ class Obfuscator:
             algorithm=hashes.SHA256(),
             length=64,  # 512 bits for AES-256-SIV
             salt=salt,
-            iterations=PBKDF2_ITERATIONS,
+            iterations=self.iterations,
         )
         return kdf.derive(passphrase.encode("utf-8"))
 
@@ -63,7 +64,7 @@ class Obfuscator:
             algorithm=hashes.SHA256(),
             length=32,
             salt=modified_salt,
-            iterations=PBKDF2_ITERATIONS,
+            iterations=self.iterations,
         )
         return kdf.derive(passphrase.encode("utf-8"))
 
@@ -209,7 +210,9 @@ class Obfuscator:
                             For backward compat, also accepts a flat list
                             (treated as a single unnamed sheet).
             output_format: "encrypted" or "readable"
-            readable_mappings: if format is "readable", dict of column_name -> {pseudonym: original}
+            readable_mappings: if format is "readable", either:
+                               - legacy dict column_name -> {pseudonym: original}
+                               - dict {"by_sheet": {sheet: {column: {pseudonym: original}}}}
             exclusions: optional dict of sheet_name -> {col_name: list of excluded values}
         """
         # Normalize to per-sheet format
@@ -256,7 +259,7 @@ class Obfuscator:
             "version": KEY_FILE_VERSION,
             "algorithm": "AES-256-SIV",
             "kdf": "PBKDF2-SHA256",
-            "iterations": PBKDF2_ITERATIONS,
+            "iterations": self.iterations,
             "salt": base64.b64encode(self.salt).decode("ascii"),
             "created_at": datetime.now(UTC).isoformat(),
             "source_file": source_file,
@@ -284,7 +287,8 @@ class Obfuscator:
             key_data = json.load(f)
 
         salt = base64.b64decode(key_data["salt"])
-        obfuscator = cls(passphrase, salt=salt)
+        iterations = key_data.get("iterations", PBKDF2_ITERATIONS)
+        obfuscator = cls(passphrase, salt=salt, iterations=iterations)
 
         version = key_data.get("version", 1)
 

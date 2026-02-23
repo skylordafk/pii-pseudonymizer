@@ -7,6 +7,6 @@
   "timeout_seconds": 120,
   "pbkdf2_iterations": 480000,
   "max_sample_values": 10,
-  "keys_directory": "keys",
+  "keys_directory": "~/.config/pii-pseudonymizer/keys",
   "output_directory": "output"
 }

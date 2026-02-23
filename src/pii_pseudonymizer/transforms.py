@@ -525,10 +525,12 @@ class ReadableTransformer:
             hmac_key: bytes key for HMAC operations (derived from passphrase)
         """
         self.hmac_key = hmac_key
-        # Track forward mappings for storage in key file
-        self._mappings = {}  # column_name -> {original: pseudonym}
+        # Backward-compatible flat mappings: column_name -> {pseudonym: original}
+        self._flat_mappings = {}
+        # Sheet-scoped mappings: sheet_name -> column_name -> {pseudonym: original}
+        self._sheet_mappings = {}
 
-    def transform_value(self, value, column_name, pii_type):
+    def transform_value(self, value, column_name, pii_type, sheet_name=None):
         """Transform a single value based on PII type.
 
         Returns the pseudonymized value (readable fake).
@@ -554,14 +556,11 @@ class ReadableTransformer:
             prefix = pii_type.upper()[:4]
             result = f"{prefix}_{idx:04d}"
 
-        # Store mapping
-        if column_name not in self._mappings:
-            self._mappings[column_name] = {}
-        self._mappings[column_name][result] = str_val
+        self._store_mapping(result, str_val, column_name, sheet_name)
 
         return result
 
-    def reverse_value(self, pseudonym, column_name, pii_type):
+    def reverse_value(self, pseudonym, column_name, pii_type, sheet_name=None):
         """Reverse a readable pseudonym using the stored mapping."""
         if pseudonym is None:
             return None
@@ -569,16 +568,81 @@ class ReadableTransformer:
         if not str_val:
             return pseudonym
 
-        mapping = self._mappings.get(column_name, {})
-        return mapping.get(str_val, pseudonym)
+        scoped = self._sheet_mappings.get(sheet_name, {}).get(column_name, {})
+        if str_val in scoped:
+            return scoped[str_val]
+
+        flat = self._flat_mappings.get(column_name, {})
+        if str_val in flat:
+            return flat[str_val]
+
+        if sheet_name is None:
+            # Fallback for legacy GUI flow where sheet may be unspecified:
+            # search all sheets for a unique match.
+            matches = []
+            for cols in self._sheet_mappings.values():
+                val = cols.get(column_name, {}).get(str_val)
+                if val is not None:
+                    matches.append(val)
+            if len(matches) == 1:
+                return matches[0]
+
+        return pseudonym
 
     def get_mappings(self):
         """Return all mappings for key file storage."""
-        return dict(self._mappings)
+        if not self._sheet_mappings:
+            return dict(self._flat_mappings)
+        if not self._flat_mappings:
+            return {"by_sheet": self._sheet_mappings}
+        return {"by_sheet": self._sheet_mappings, "flat": self._flat_mappings}
 
     def load_mappings(self, mappings):
         """Load mappings from key file for reversal."""
-        self._mappings = dict(mappings)
+        self._flat_mappings = {}
+        self._sheet_mappings = {}
+
+        if not mappings:
+            return
+
+        if "by_sheet" in mappings:
+            by_sheet = mappings.get("by_sheet") or {}
+            if isinstance(by_sheet, dict):
+                self._sheet_mappings = {
+                    str(sheet): {
+                        str(col): dict(col_map)
+                        for col, col_map in cols.items()
+                        if isinstance(col_map, dict)
+                    }
+                    for sheet, cols in by_sheet.items()
+                    if isinstance(cols, dict)
+                }
+            flat = mappings.get("flat") or {}
+            if isinstance(flat, dict):
+                self._flat_mappings = {
+                    str(col): dict(col_map)
+                    for col, col_map in flat.items()
+                    if isinstance(col_map, dict)
+                }
+            return
+
+        if _looks_like_sheet_mappings(mappings):
+            self._sheet_mappings = {
+                str(sheet): {
+                    str(col): dict(col_map)
+                    for col, col_map in cols.items()
+                    if isinstance(col_map, dict)
+                }
+                for sheet, cols in mappings.items()
+                if isinstance(cols, dict)
+            }
+            return
+
+        self._flat_mappings = {
+            str(col): dict(col_map)
+            for col, col_map in mappings.items()
+            if isinstance(col_map, dict)
+        }
 
     def _transform_name(self, name, col_key, column_name):
         """Generate a deterministic fake name."""
@@ -643,7 +707,7 @@ class ReadableTransformer:
         idx = _hmac_index(col_key, email, 10000)
         return f"user_{idx:04d}@example.com"
 
-    def transform_rows(self, headers, rows, columns_to_transform):
+    def transform_rows(self, headers, rows, columns_to_transform, sheet_name=None):
         """Transform specified columns across all rows.
 
         Args:
@@ -661,11 +725,13 @@ class ReadableTransformer:
             new_row = dict(row)
             for col_name, pii_type in col_map.items():
                 if col_name in new_row:
-                    new_row[col_name] = self.transform_value(new_row[col_name], col_name, pii_type)
+                    new_row[col_name] = self.transform_value(
+                        new_row[col_name], col_name, pii_type, sheet_name=sheet_name
+                    )
             transformed_rows.append(new_row)
         return transformed_rows
 
-    def reverse_rows(self, headers, rows, columns_to_reverse):
+    def reverse_rows(self, headers, rows, columns_to_reverse, sheet_name=None):
         """Reverse transformation for specified columns."""
         col_map = {c["name"]: c["pii_type"] for c in columns_to_reverse}
 
@@ -674,6 +740,39 @@ class ReadableTransformer:
             new_row = dict(row)
             for col_name, pii_type in col_map.items():
                 if col_name in new_row:
-                    new_row[col_name] = self.reverse_value(new_row[col_name], col_name, pii_type)
+                    new_row[col_name] = self.reverse_value(
+                        new_row[col_name], col_name, pii_type, sheet_name=sheet_name
+                    )
             reversed_rows.append(new_row)
         return reversed_rows
+
+    def _store_mapping(self, pseudonym, original, column_name, sheet_name):
+        """Store mapping in flat or sheet-scoped namespace."""
+        if sheet_name is None:
+            if column_name not in self._flat_mappings:
+                self._flat_mappings[column_name] = {}
+            self._flat_mappings[column_name][pseudonym] = original
+            return
+
+        if sheet_name not in self._sheet_mappings:
+            self._sheet_mappings[sheet_name] = {}
+        if column_name not in self._sheet_mappings[sheet_name]:
+            self._sheet_mappings[sheet_name][column_name] = {}
+        self._sheet_mappings[sheet_name][column_name][pseudonym] = original
+
+
+def _looks_like_sheet_mappings(mappings):
+    """Heuristically detect sheet->column->mapping structure."""
+    if not isinstance(mappings, dict) or not mappings:
+        return False
+
+    for sheet_val in mappings.values():
+        if not isinstance(sheet_val, dict):
+            return False
+        if not sheet_val:
+            continue
+        # In sheet mappings, inner values are per-column dicts.
+        if any(isinstance(v, dict) for v in sheet_val.values()):
+            return True
+
+    return False

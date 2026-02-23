@@ -38,7 +38,8 @@ class DecryptGUI:
 
         self.obfuscator = None
         self.key_data = None
-        self._column_type_map = {}  # column_name -> pii_type from key file
+        self._column_type_map = {}  # (sheet_name, column_name) -> pii_type
+        self._columns_by_sheet = {}  # sheet_name -> list[column_name]
         self._scanned_columns = []  # populated by _scan_columns()
         self._selected_encrypt_columns = []  # set by _select_encrypt_columns()
         self._enc_obfuscator = None  # cached obfuscator for encrypt (no key file)
@@ -98,6 +99,13 @@ class DecryptGUI:
 
         sel_frame = ttk.Frame(single_frame)
         sel_frame.pack(fill=tk.X, pady=(0, 5))
+
+        ttk.Label(sel_frame, text="Sheet:").pack(side=tk.LEFT)
+        self.sheet_var = tk.StringVar()
+        self.sheet_combo = ttk.Combobox(
+            sel_frame, textvariable=self.sheet_var, width=20, state="readonly"
+        )
+        self.sheet_combo.pack(side=tk.LEFT, padx=5)
 
         ttk.Label(sel_frame, text="Column:").pack(side=tk.LEFT)
         self.column_var = tk.StringVar()
@@ -384,38 +392,54 @@ class DecryptGUI:
 
         # Populate column/type dropdowns from key data
         sheets = self.key_data.get("sheets", {})
-        columns = []
         types = set()
+        total_columns = 0
         self._column_type_map = {}
-        for sheet_meta in sheets.values():
+        self._columns_by_sheet = {}
+        for sheet_name, sheet_meta in sheets.items():
             for col_name, col_info in sheet_meta.get("columns", {}).items():
                 if col_info.get("obfuscated"):
                     pii_type = col_info.get("pii_type", "generic")
-                    columns.append(col_name)
+                    self._columns_by_sheet.setdefault(sheet_name, []).append(col_name)
                     types.add(pii_type)
-                    self._column_type_map[col_name] = pii_type
+                    self._column_type_map[(sheet_name, col_name)] = pii_type
+                    total_columns += 1
 
-        self.column_combo["values"] = sorted(set(columns))
+        sheet_names = sorted(self._columns_by_sheet.keys())
+        self.sheet_combo["values"] = sheet_names
         self.type_combo["values"] = sorted(types)
-        if columns:
-            self.column_combo.current(0)
-            # Auto-select matching type for first column
-            self._on_column_selected()
+        if sheet_names:
+            self.sheet_combo.current(0)
+            self._on_sheet_selected()
         elif types:
             self.type_combo.current(0)
 
+        # Bind selection updates
+        self.sheet_combo.bind("<<ComboboxSelected>>", lambda _: self._on_sheet_selected())
         # Bind column selection to auto-update type
         self.column_combo.bind("<<ComboboxSelected>>", lambda _: self._on_column_selected())
 
         file_format = self.key_data.get("format", "encrypted")
         self.status_var.set(
-            f"Key loaded: {len(sheets)} sheet(s), {len(columns)} column(s), format={file_format}"
+            f"Key loaded: {len(sheets)} sheet(s), {total_columns} column(s), format={file_format}"
         )
+
+    def _on_sheet_selected(self):
+        """Update available columns when a sheet is selected."""
+        sheet = self.sheet_var.get()
+        columns = sorted(set(self._columns_by_sheet.get(sheet, [])))
+        self.column_combo["values"] = columns
+        if columns:
+            self.column_combo.current(0)
+            self._on_column_selected()
+        else:
+            self.column_var.set("")
 
     def _on_column_selected(self):
         """Auto-select the PII type when a column is chosen."""
+        sheet = self.sheet_var.get()
         col = self.column_var.get()
-        pii_type = self._column_type_map.get(col)
+        pii_type = self._column_type_map.get((sheet, col))
         if pii_type:
             self.type_var.set(pii_type)
 
@@ -437,10 +461,14 @@ class DecryptGUI:
             return
 
         value = self.input_text.get("1.0", tk.END).strip()
+        sheet = self.sheet_var.get().strip()
         column = self.column_var.get()
         pii_type = self.type_var.get()
 
         if not value:
+            return
+        if not sheet:
+            messagebox.showerror("Error", "Select a sheet.")
             return
         if not column:
             messagebox.showerror("Error", "Select a column.")
@@ -457,14 +485,26 @@ class DecryptGUI:
                 transformer = ReadableTransformer(self.obfuscator.master_key[:32])
                 mappings = self.key_data.get("readable_mappings", {})
                 transformer.load_mappings(mappings)
-                result = transformer.reverse_value(value, column, pii_type)
+                result = transformer.reverse_value(
+                    value, column, pii_type, sheet_name=sheet
+                )
+                if str(result) == value:
+                    for sname, col_name in self._column_type_map:
+                        result = transformer.reverse_value(
+                            value,
+                            col_name,
+                            self._column_type_map[(sname, col_name)],
+                            sheet_name=sname,
+                        )
+                        if str(result) != value:
+                            break
             else:
                 try:
                     result = self.obfuscator.deobfuscate_value(value, column, pii_type)
                 except Exception:
                     # Wrong column/type combo — try all known pairs from key file
                     result = None
-                    for col, pt in self._column_type_map.items():
+                    for (_sname, col), pt in self._column_type_map.items():
                         try:
                             result = self.obfuscator.deobfuscate_value(value, col, pt)
                             break
@@ -610,6 +650,7 @@ class DecryptGUI:
             metadata = read_xlsx(input_path)
 
             self._scanned_columns = []
+            self._selected_encrypt_columns = []
             self.enc_columns_listbox.delete(0, tk.END)
 
             for sname in metadata["sheet_names"]:
@@ -640,15 +681,26 @@ class DecryptGUI:
         """Programmatically set which columns to encrypt (for testing and API use).
 
         Args:
-            columns: list of dicts with 'name' and 'pii_type' keys
+            columns: list of dicts with 'name', 'pii_type', and optional 'sheet'
         """
         self._selected_encrypt_columns = list(columns)
 
-        # Update PII types in the scanned columns to match
-        selected_map = {c["name"]: c["pii_type"] for c in columns}
+        # Update PII types in the scanned columns to match.
+        # If sheet is omitted, apply to matching names across all sheets.
+        selected_by_sheet = {}
+        selected_by_name = {}
+        for col in columns:
+            if col.get("sheet"):
+                selected_by_sheet[(col["sheet"], col["name"])] = col["pii_type"]
+            else:
+                selected_by_name[col["name"]] = col["pii_type"]
+
         for col in self._scanned_columns:
-            if col["name"] in selected_map:
-                col["pii_type"] = selected_map[col["name"]]
+            key = (col["sheet"], col["name"])
+            if key in selected_by_sheet:
+                col["pii_type"] = selected_by_sheet[key]
+            elif col["name"] in selected_by_name:
+                col["pii_type"] = selected_by_name[col["name"]]
 
     def _set_column_types(self):
         """Set the PII type for currently selected columns in the listbox."""
@@ -683,7 +735,11 @@ class DecryptGUI:
             return []
 
         return [
-            {"name": self._scanned_columns[i]["name"], "pii_type": self._scanned_columns[i]["pii_type"]}
+            {
+                "sheet": self._scanned_columns[i]["sheet"],
+                "name": self._scanned_columns[i]["name"],
+                "pii_type": self._scanned_columns[i]["pii_type"],
+            }
             for i in selected_indices
             if i < len(self._scanned_columns)
         ]
@@ -724,7 +780,7 @@ class DecryptGUI:
             self.root.update_idletasks()
 
             from pii_pseudonymizer.obfuscator import Obfuscator
-            from pii_pseudonymizer.reader import read_all_rows, read_xlsx, write_xlsx
+            from pii_pseudonymizer.reader import read_xlsx, transform_workbook
 
             obfuscator = Obfuscator(passphrase)
 
@@ -735,35 +791,30 @@ class DecryptGUI:
                 readable_transformer = ReadableTransformer(obfuscator.master_key[:32])
 
             metadata = read_xlsx(input_path)
-            all_sheets_data = read_all_rows(input_path)
-
-            # Build per-sheet column mapping
-            col_names_set = {c["name"] for c in columns_to_encrypt}
-            col_type_map = {c["name"]: c["pii_type"] for c in columns_to_encrypt}
+            # Build per-sheet mapping with sheet-scoped identity.
+            selected_by_sheet = {}
+            selected_by_name = {}
+            for col in columns_to_encrypt:
+                if col.get("sheet"):
+                    selected_by_sheet[(col["sheet"], col["name"])] = col["pii_type"]
+                else:
+                    selected_by_name[col["name"]] = col["pii_type"]
 
             sheets_columns = {}
-            obfuscated_sheets = {}
-
             for sname in metadata["sheet_names"]:
-                if sname not in all_sheets_data:
-                    continue
-                headers, rows = all_sheets_data[sname]
-
-                # Find which of the selected columns are in this sheet
-                sheet_cols = []
-                for h in headers:
-                    if h in col_names_set:
-                        sheet_cols.append({"name": h, "pii_type": col_type_map[h]})
-
-                if sheet_cols:
-                    sheets_columns[sname] = sheet_cols
-                    if readable_transformer:
-                        obf_rows = readable_transformer.transform_rows(headers, rows, sheet_cols)
-                    else:
-                        obf_rows = obfuscator.obfuscate_rows(headers, rows, sheet_cols)
-                    obfuscated_sheets[sname] = (headers, obf_rows)
-                else:
-                    obfuscated_sheets[sname] = (headers, rows)
+                headers = metadata["sheets"][sname].get("headers", [])
+                sheet_map = {}
+                for header in headers:
+                    key = (sname, header)
+                    if key in selected_by_sheet:
+                        sheet_map[header] = selected_by_sheet[key]
+                    elif header in selected_by_name:
+                        sheet_map[header] = selected_by_name[header]
+                if sheet_map:
+                    sheets_columns[sname] = [
+                        {"name": name, "pii_type": pii_type}
+                        for name, pii_type in sheet_map.items()
+                    ]
 
             if not sheets_columns:
                 messagebox.showerror(
@@ -771,8 +822,22 @@ class DecryptGUI:
                 )
                 return
 
-            # Write output
-            write_xlsx(output_path, obfuscated_sheets)
+            def _transform_cell(value, column_name, pii_type, sheet_name):
+                if readable_transformer:
+                    return readable_transformer.transform_value(
+                        value,
+                        column_name,
+                        pii_type,
+                        sheet_name=sheet_name,
+                    )
+                return obfuscator.obfuscate_value(value, column_name, pii_type)
+
+            stats = transform_workbook(
+                input_path,
+                output_path,
+                sheets_columns,
+                _transform_cell,
+            )
 
             readable_mappings = (
                 readable_transformer.get_mappings() if readable_transformer else None
@@ -785,10 +850,11 @@ class DecryptGUI:
                 readable_mappings=readable_mappings,
             )
 
-            total_rows = sum(len(rows) for _h, rows in obfuscated_sheets.values())
+            total_rows = sum(metadata["sheets"][s]["row_count"] for s in sheets_columns)
             total_cols = sum(len(cols) for cols in sheets_columns.values())
             self.enc_file_status_var.set(
-                f"Done. {total_rows} rows, {total_cols} column(s) encrypted. "
+                f"Done. {total_rows} rows, {total_cols} column(s) encrypted, "
+                f"{stats['transformed_cells']} cell(s) transformed. "
                 f"Output: {output_path}"
             )
             messagebox.showinfo(

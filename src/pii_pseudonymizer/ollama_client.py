@@ -40,9 +40,17 @@ ANALYSIS_SCHEMA = {
 
 
 class OllamaClient:
-    def __init__(self, base_url="http://localhost:11434", model="mistral:7b"):
+    def __init__(
+        self,
+        base_url="http://localhost:11434",
+        model="mistral:7b",
+        num_ctx=2048,
+        temperature=0,
+    ):
         self.base_url = base_url.rstrip("/")
         self.model = model
+        self.num_ctx = num_ctx
+        self.temperature = temperature
 
     def health_check(self):
         """Check if Ollama is running and the model is available."""
@@ -62,15 +70,16 @@ class OllamaClient:
         except Exception as e:
             return False, f"Error: {e}"
 
-    def chat(self, messages, schema=None, temperature=0, timeout=300):
+    def chat(self, messages, schema=None, temperature=None, timeout=300, num_ctx=None):
         """
         Send a chat request to Ollama.
 
         Args:
             messages: list of {role, content} dicts
             schema: optional JSON schema for structured output
-            temperature: 0 for deterministic
+            temperature: optional override (default from client config)
             timeout: seconds
+            num_ctx: optional context-window override (default from client config)
 
         Returns:
             dict with 'content' (str) and 'raw' (full response)
@@ -80,8 +89,8 @@ class OllamaClient:
             "messages": messages,
             "stream": False,
             "options": {
-                "temperature": temperature,
-                "num_ctx": 2048,
+                "temperature": self.temperature if temperature is None else temperature,
+                "num_ctx": self.num_ctx if num_ctx is None else num_ctx,
             },
         }
 
@@ -154,7 +163,7 @@ For each column provide:
             {"role": "user", "content": prompt},
         ]
 
-        result = self.chat(messages, schema=ANALYSIS_SCHEMA, temperature=0, timeout=300)
+        result = self.chat(messages, schema=ANALYSIS_SCHEMA, timeout=300)
 
         try:
             parsed = json.loads(result["content"])
@@ -262,7 +271,10 @@ Provide:
 
         try:
             result = self.chat(
-                messages, schema=single_column_schema, temperature=0, timeout=timeout
+                messages,
+                schema=single_column_schema,
+                timeout=timeout,
+                num_ctx=num_ctx,
             )
             parsed = json.loads(result["content"])
             return parsed

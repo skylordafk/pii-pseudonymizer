@@ -33,6 +33,7 @@ The tool will:
 - Show you what it found and let you toggle columns on/off
 - Ask you to set a passphrase
 - Write a pseudonymized copy to `output/yourfile_pseudonymized.xlsx`
+- Preserve workbook structure (sheet order, formulas, and formatting)
 - Save an encrypted key file to `~/.config/pii-pseudonymizer/keys/`
 
 Use `--format=readable` if you want AI-friendly fake names/dates instead of encrypted tokens:

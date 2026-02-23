@@ -46,9 +46,12 @@ class Config:
         for path in search_paths:
             if os.path.isfile(path):
                 try:
-                    with open(path) as f:
+                    with open(path, encoding="utf-8") as f:
                         data = json.load(f)
-                    return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+                    cleaned = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+                    if "keys_directory" in cleaned:
+                        cleaned["keys_directory"] = os.path.expanduser(cleaned["keys_directory"])
+                    return cls(**cleaned)
                 except (json.JSONDecodeError, TypeError):
                     continue
 
@@ -66,10 +69,10 @@ class Config:
         Returns:
             dict with 'always_pii' and 'never_pii' lists of strings.
         """
-        path = lists_path or cls._lists_path()
+        path = os.path.expanduser(lists_path or cls._lists_path())
         if os.path.isfile(path):
             try:
-                with open(path) as f:
+                with open(path, encoding="utf-8") as f:
                     data = json.load(f)
                 return {
                     "always_pii": data.get("always_pii", []),
@@ -82,7 +85,7 @@ class Config:
     @classmethod
     def save_lists(cls, lists_data, lists_path=None):
         """Save the allowlist/denylist to disk."""
-        path = lists_path or cls._lists_path()
+        path = os.path.expanduser(lists_path or cls._lists_path())
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(lists_data, f, indent=2)
