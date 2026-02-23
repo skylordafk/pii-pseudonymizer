@@ -1,0 +1,46 @@
+# Virtual Environment
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+
+# Encryption Keys (CRITICAL - never commit)
+keys/
+
+# Processed Data
+output/
+
+# Build & Test Artifacts
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE & Editor
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+
+# Local overrides
+.env
+.env.local
+
+# Legacy root-level scripts (superseded by src/pii_pseudonymizer/)
+/main.py
+/reader.py
+/detector.py
+/heuristics.py
+/obfuscator.py
+/ollama_client.py
+/decoder.py
+/test_roundtrip.py

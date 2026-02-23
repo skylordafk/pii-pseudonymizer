@@ -1,0 +1,12 @@
+{
+  "ollama_url": "http://localhost:11434",
+  "default_model": "mistral:7b",
+  "fallback_model": "qwen2.5:3b",
+  "num_ctx": 2048,
+  "temperature": 0,
+  "timeout_seconds": 120,
+  "pbkdf2_iterations": 480000,
+  "max_sample_values": 10,
+  "keys_directory": "keys",
+  "output_directory": "output"
+}
