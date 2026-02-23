@@ -38,6 +38,7 @@ class DecryptGUI:
 
         self.obfuscator = None
         self.key_data = None
+        self._column_type_map = {}  # column_name -> pii_type from key file
         self._scanned_columns = []  # populated by _scan_columns()
         self._selected_encrypt_columns = []  # set by _select_encrypt_columns()
         self._enc_obfuscator = None  # cached obfuscator for encrypt (no key file)
@@ -385,23 +386,38 @@ class DecryptGUI:
         sheets = self.key_data.get("sheets", {})
         columns = []
         types = set()
+        self._column_type_map = {}
         for sheet_meta in sheets.values():
             for col_name, col_info in sheet_meta.get("columns", {}).items():
                 if col_info.get("obfuscated"):
+                    pii_type = col_info.get("pii_type", "generic")
                     columns.append(col_name)
-                    types.add(col_info.get("pii_type", "generic"))
+                    types.add(pii_type)
+                    self._column_type_map[col_name] = pii_type
 
         self.column_combo["values"] = sorted(set(columns))
         self.type_combo["values"] = sorted(types)
         if columns:
             self.column_combo.current(0)
-        if types:
+            # Auto-select matching type for first column
+            self._on_column_selected()
+        elif types:
             self.type_combo.current(0)
+
+        # Bind column selection to auto-update type
+        self.column_combo.bind("<<ComboboxSelected>>", lambda _: self._on_column_selected())
 
         file_format = self.key_data.get("format", "encrypted")
         self.status_var.set(
             f"Key loaded: {len(sheets)} sheet(s), {len(columns)} column(s), format={file_format}"
         )
+
+    def _on_column_selected(self):
+        """Auto-select the PII type when a column is chosen."""
+        col = self.column_var.get()
+        pii_type = self._column_type_map.get(col)
+        if pii_type:
+            self.type_var.set(pii_type)
 
     # ── Decrypt operations ────────────────────────────────────────
 
@@ -443,7 +459,19 @@ class DecryptGUI:
                 transformer.load_mappings(mappings)
                 result = transformer.reverse_value(value, column, pii_type)
             else:
-                result = self.obfuscator.deobfuscate_value(value, column, pii_type)
+                try:
+                    result = self.obfuscator.deobfuscate_value(value, column, pii_type)
+                except Exception:
+                    # Wrong column/type combo — try all known pairs from key file
+                    result = None
+                    for col, pt in self._column_type_map.items():
+                        try:
+                            result = self.obfuscator.deobfuscate_value(value, col, pt)
+                            break
+                        except Exception:
+                            continue
+                    if result is None:
+                        raise
 
             self.output_text.config(state=tk.NORMAL)
             self.output_text.delete("1.0", tk.END)
